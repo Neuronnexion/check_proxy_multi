@@ -2,8 +2,7 @@
 
 import urllib3
 from concurrent.futures import ThreadPoolExecutor
-import sys, getopt
-
+import sys, getopt, random, time
 urls = [
         { 'expect': [200], 'url': 'http://en.wikipedia.org/wiki/2010-11_Premier_League-aa' },
 #        { 'expect': [200], 'url': 'http://en.wikipedia.org/wiki/List_of_MythBusters_episodes' },
@@ -23,48 +22,135 @@ urls = [
 
 # http://clients3.google.com/generate_204
 
+VERBOSE = False
+
 status = { 'done': 0, 'ok': 0 }
 
+def exitcode(level, msg):
+
+    exits = {
+        'O': { 'exit': 0, 'status': 'OK' },
+        'C': { 'exit': 2, 'status': 'CRITICAL' },
+        'U': { 'exit': 3, 'status': 'UNKOWN' },
+        }
+
+    if (not level in exits):
+        print("Unknown exit level", level)
+        sys.exit(-1)
+
+    msgout = "check_proxy_multi %s - %s" % ( exits[level]['status'], msg )
+    print (msgout)
+    sys.exit(exits[level]['exit'])
+
+
 def download(urlitem, cmanager):
-    global status
+    global status, VERBOSE
+
     url = urlitem['url'] 
     expect = urlitem['expect']
     response = cmanager.request('GET', url)
     try:
         if response :
             status['done'] += 1
+            # print (type(response.status), response.status, type(expect), expect)
             if (response.status in expect):
                 status['ok'] += 1
             #print("+++++++++  url: " + url)
-            print("+++++++++ [%d/%d] url: %s" % (status['ok'], status['done'], url))
-            print(response.data[:1024])
+            if ( VERBOSE ):
+                print("+++++++++ [%d/%d] url: %s" % (status['ok'], status['done'], url))
+                print(response.status, response.data[:1024])
     except Exception as e:
         print(e)
 
+def load_urls(filename):
+    global VERBOSE
+
+    urls = []
+    with open(filename) as fd:
+        for l in fd.readlines():
+            l = l.strip()
+            # Format attendu :
+            # 200,http://www.openbsd.org/
+            # 200|204,http://clients3.google.com/generate_204
+            # => code http 200 ou 204 
+            # => url http://....
+            ( expect, url ) = l.split(',')
+            # we need "ints"
+            expects = map (lambda x: int(x), expect.split('|'))
+            url_data = { 'expect': expects, 'url': url }
+            if ( VERBOSE ):
+                print(expect, url)
+            urls.append(url_data)
+
+    return urls
 
 def help(exitc=0):
-    print ('test.py -i <inputfile> -o <outputfile>')
+    print ('check_proxy_multi.py [-h] [-v] -f <urls_file> [-n <number_of_checks>] [-t <timeout>]')
     sys.exit(exitc)
 
 def main(argv):
+    global VERBOSE
+
     try:
-        opts, args = getopt.getopt(argv,"hf:o:",["urlsfile=","ofile="])
+        opts, args = getopt.getopt(argv,"hvf:n:t:",["urlsfile=","nchecks=","timeout="])
     except getopt.GetoptError:
         help(2)
+
+    urlsfile = None
+    nchecks = 3
+    timeout = 5
+
     for opt, arg in opts:
+        #print (opt, arg)
         if opt == '-h':
             help()
+        elif opt == '-v':
+            VERBOSE = True
         elif (opt == '-f') or (opt == '--urlsfile'):
-            print (arg)
+            #print (arg)
+            urlsfile = arg
+        elif (opt == '-n') or (opt == '--nchecks'):
+            #print (arg)
+            nchecks = int(arg)
+        elif (opt == '-t') or (opt == '--timeout'):
+            # print (opt, arg)
+            timeout = int(arg)
+
+    if ( urlsfile is None ):
+        help(-1)
 
     #connection_mgr = urllib3.PoolManager(maxsize=5)
     connection_mgr = urllib3.ProxyManager('http://10.5.1.86:3131/', maxsize=5)
     thread_pool = ThreadPoolExecutor(5)
-    for urlitem in urls:
+
+    urls = load_urls(urlsfile)
+
+    # max is the number of url in list
+    if ( nchecks > len(urls) ):
+        nchecks = len(urls)
+
+    # randomize url list, to take the nth first
+    random.shuffle(urls)
+    for urlitem in urls[0:nchecks]:
         thread_pool.submit(download, urlitem, connection_mgr)
 
-    while True:
-        print(status)
+    start_t = time.time()
+    curr_t = time.time()
+    while ( (status['done'] < nchecks) and ( curr_t < (start_t + timeout) ) ):
+#    while True:
+        #print((curr_t-start_t), timeout, status)
+        time.sleep(0.01)
+        curr_t = time.time()
+
+    if ( status['ok'] > 0):
+        # at least one success
+        exitcode('O', '%(ok)d out of %(done)d URL have been opened successfuly' % status)
+    elif ( (curr_t-start_t) > timeout ):
+        exitcode('C', 'No URL has been opened successfuly within timeout (%d)' % timeout)
+    else:
+        # all failed
+        exitcode('C', 'No URL has been opened successfuly')
+        
 
 if __name__ == "__main__":
     main(sys.argv[1:])
